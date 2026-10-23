@@ -1,0 +1,11 @@
+{
+  "$schema": "https://pi.dev/schemas/models.schema.json",
+  "providers": {
+    "omlx": {
+      "baseUrl": "http://host.containers.internal:8001/v1",
+      "api": "openai-completions",
+      "apiKey": "$OMLX_API_KEY",
+      "models": [{ "id": "Qwen3-Coder-30B-A3B-Instruct-MLX-4bit" }]
+    }
+  }
+}

@@ -1,0 +1,1 @@
+{"$schema":"https://pi.dev/schemas/settings.schema.json","defaultProvider":"omlx","defaultModel":"Qwen3-Coder-30B-A3B-Instruct-MLX-4bit","enableInstallTelemetry":false}

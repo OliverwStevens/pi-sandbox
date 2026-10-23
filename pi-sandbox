@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Run pi (yolo) in a locked-down Podman container. Usage: pi-sandbox [dir] [-- pi args...]
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+IMAGE=pi-sandbox
+WORK="${1:-$PWD}"; [ $# -gt 0 ] && shift || true
+[ "${1:-}" = "--" ] && shift
+: "${OMLX_API_KEY:?export OMLX_API_KEY first (your omlx server key)}"
+
+podman machine inspect --format '{{.State}}' 2>/dev/null | grep -q running || podman machine start
+podman image exists "$IMAGE" || podman build -t "$IMAGE" "$HERE"
+
+# Fresh agent home each run, seeded from agent-home/. Nothing persists except /workspace.
+exec podman run --rm -it \
+  --cap-drop=ALL \
+  --security-opt=no-new-privileges \
+  --read-only \
+  --tmpfs /tmp:rw,size=256m \
+  --tmpfs /root:rw,size=128m \
+  --pids-limit=256 --memory=1g --cpus=2 \
+  -e OMLX_API_KEY \
+  -v "$WORK:/workspace" \
+  -v "$HERE/agent-home:/seed:ro" \
+  --entrypoint bash "$IMAGE" -c '
+    mkdir -p /root/.pi && cp -r /seed /root/.pi/agent && exec pi "$@"' _ "$@"
