@@ -10,6 +10,7 @@ WORK="${1:-$PWD}"; [ $# -gt 0 ] && shift || true
 podman machine inspect --format '{{.State}}' 2>/dev/null | grep -q running || podman machine start
 podman image exists "$IMAGE" || podman build -t "$IMAGE" "$HERE"
 
+mkdir -p "$HERE/sessions"
 # Fresh agent home each run, seeded from agent-home/. Nothing persists except /workspace.
 exec podman run --rm -it \
   --cap-drop=ALL \
@@ -21,5 +22,6 @@ exec podman run --rm -it \
   -e OMLX_API_KEY \
   -v "$WORK:/workspace" \
   -v "$HERE/agent-home:/seed:ro" \
+  -v "$HERE/sessions:/root/.pi/agent/sessions" \
   --entrypoint bash "$IMAGE" -c '
-    mkdir -p /root/.pi && cp -r /seed /root/.pi/agent && exec pi "$@"' _ "$@"
+    cp -r /seed/. /root/.pi/agent/ && exec pi "$@"' _ "$@"

@@ -85,12 +85,23 @@ struct ContentView: View {
         ScrollView {
             VStack(spacing: 14) {
                 header
-                setupCard
-                serverCard
-                projectCard
-                launchBar
-                selfTestCard
-                footer
+                Picker("", selection: $state.tab) {
+                    Text("Setup").tag(0)
+                    Text("Monitor").tag(1)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                if state.tab == 0 {
+                    setupCard
+                    serverCard
+                    projectCard
+                    launchBar
+                    selfTestCard
+                    footer
+                } else {
+                    launchBar
+                    MonitorView(monitor: state.monitor, running: state.runningSandboxes)
+                }
             }
             .padding(20)
         }

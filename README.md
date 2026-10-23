@@ -52,6 +52,15 @@ It tries to write system dirs, mount filesystems, find host files and credential
 are dropped and limits are set. Known gaps are reported as warnings: outbound internet is open, and any service
 listening on your Mac's loopback is reachable via `host.containers.internal`, not just the model server.
 
+## Monitor tab
+
+While pi runs, the **Monitor** tab ranks the session. Pi's session log is saved to the host and analysed with
+heuristic rules: risky shell commands (pipes into a shell, credential paths, uploads, installs, mass deletes),
+edits outside the project, and edits to files your Mac later executes (git hooks, CI, scripts, `.envrc`). It
+also diffs the project folder for new symlinks and host-executed files, shows container CPU/memory, and lists
+network connections that are not the model server. It reports a 0-100 risk score, what the model is doing
+(exploring, implementing, verifying, stuck) and which attempts the sandbox blocked. These are heuristics, not proof.
+
 ## Guiding the agent
 
 `agent-home/AGENTS.md` holds always-on rules. `agent-home/skills/` holds skills

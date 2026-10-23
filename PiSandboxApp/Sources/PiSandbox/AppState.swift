@@ -36,6 +36,7 @@ final class AppState: ObservableObject {
     @Published var busy: String?
     @Published var showKey = false
     @Published var showLog = false
+    @Published var tab = 0
     @Published var selfTest: [TestResult] = []
     @Published var selfTestRan = false
     @Published var log = ""
@@ -48,9 +49,12 @@ final class AppState: ObservableObject {
         .appendingPathComponent("PiSandbox", isDirectory: true)
     var agentHome: URL { support.appendingPathComponent("agent-home", isDirectory: true) }
     var buildDir: URL { support.appendingPathComponent("build", isDirectory: true) }
+    var sessionsDir: URL { support.appendingPathComponent("sessions", isDirectory: true) }
+    let monitor = MonitorState()
     var keyFile: URL { support.appendingPathComponent("api-key") }
 
     private var timer: Timer?
+    private var monitorTimer: Timer?
     private var probeTask: Task<Void, Never>?
 
     /// Host without scheme, path or whitespace, so "http://localhost:8001/" pasted by mistake still works.
@@ -81,6 +85,13 @@ final class AppState: ObservableObject {
         apiKey = (try? String(contentsOf: support.appendingPathComponent("api-key"), encoding: .utf8)) ?? ""
         installSeed()
         Task { await refresh() }
+        monitorTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                await self.monitor.refresh(podman: self.podmanPath, project: self.projectPath,
+                                           sessions: self.sessionsDir, running: self.runningSandboxes > 0)
+            }
+        }
         timer = Timer.scheduledTimer(withTimeInterval: 8, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.busy == nil else { return }
@@ -115,6 +126,7 @@ final class AppState: ObservableObject {
         guard let seed = seedURL else { return }
         try? fm.createDirectory(at: buildDir, withIntermediateDirectories: true)
         try? fm.createDirectory(at: agentHome, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: sessionsDir, withIntermediateDirectories: true)
         let dockerfile = buildDir.appendingPathComponent("Dockerfile")
         try? fm.removeItem(at: dockerfile)
         try? fm.copyItem(at: seed.appendingPathComponent("Dockerfile"), to: dockerfile)
@@ -346,7 +358,9 @@ final class AppState: ObservableObject {
             } catch {
                 append("Could not write launcher: \(error)\n"); return
             }
+            monitor.startBaseline(project: projectPath)
             NSWorkspace.shared.open(file)
+            tab = 1
             append("Launched sandbox for \(projectPath)\n")
         }
     }
@@ -404,7 +418,8 @@ final class AppState: ObservableObject {
           -e OMLX_API_KEY \\
           -v \(q(projectPath)):/workspace \\
           -v \(q(agentHome.path)):/seed:ro \\
-          --entrypoint bash \(Self.imageName) -c 'mkdir -p /root/.pi && cp -r /seed /root/.pi/agent && exec pi'
+          -v \(q(sessionsDir.path)):/root/.pi/agent/sessions \\
+          --entrypoint bash \(Self.imageName) -c 'cp -r /seed/. /root/.pi/agent/ && exec pi'
         echo
         echo "Sandbox exited. You can close this window."
         """
