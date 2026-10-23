@@ -4,6 +4,20 @@ import SwiftUI
 struct PiSandboxApp: App {
     @StateObject private var state = AppState()
 
+    init() {
+        // Headless mode for CI and debugging: `PiSandbox --selftest` prints the sandbox self-test and exits.
+        if CommandLine.arguments.contains("--selftest") {
+            Task { @MainActor in
+                let s = AppState()
+                await s.refresh()
+                await s.runSelfTest()
+                for r in s.selfTest { print("\(r.status) \(r.text)") }
+                print(s.log.isEmpty ? "" : "--- log ---\n\(s.log)")
+                exit(s.selfTest.contains { $0.status == "FAIL" } || s.selfTest.isEmpty ? 1 : 0)
+            }
+        }
+    }
+
     var body: some Scene {
         Window("Pi Sandbox", id: "main") {
             ContentView().environmentObject(state)

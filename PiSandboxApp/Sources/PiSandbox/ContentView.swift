@@ -144,7 +144,7 @@ struct ContentView: View {
                 disabled: state.busy != nil)
             Divider()
             StatusRow(
-                title: "Podman machine",
+                title: "Sandbox VM (Podman machine)",
                 detail: machineDetail,
                 health: machineHealth,
                 actionTitle: machineAction.0,
@@ -224,10 +224,24 @@ struct ContentView: View {
                     .foregroundStyle(state.projectPath.isEmpty ? .secondary : .primary)
                 Spacer()
                 Button("Choose…") { state.chooseProject() }
+                Button("Reveal") { state.revealWorkspace() }
             }
-            Label("Yolo mode: pi can edit or delete anything in this folder, and nothing else. Commit to git first.",
+            if !state.projectPath.isEmpty && !state.projectInsideWorkspace {
+                Label("This folder is outside ~/PiSandbox. Choose it again to copy it in.", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+            Label("Yolo mode: pi can edit or delete anything in this folder, and nothing else. Projects live in ~/PiSandbox. Git hooks, .git/config, .github, .envrc and .vscode are read-only to pi.",
                   systemImage: "exclamationmark.shield")
                 .font(.caption).foregroundStyle(.secondary)
+            Toggle(isOn: $state.allowInternet) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Allow internet access (less safe)")
+                    Text(state.allowInternet
+                         ? "ON: pi can reach the internet, GitHub and every service on your Mac's localhost."
+                         : "OFF: pi can reach only your model server, through a one-port gate.")
+                        .font(.caption).foregroundStyle(state.allowInternet ? Color.orange : Color.secondary)
+                }
+            }
         }
     }
 
@@ -339,9 +353,9 @@ struct ContentView: View {
     var machineDetail: String {
         switch state.machine {
         case .unknown: "Unknown"
-        case .missing: "Not created yet"
-        case .stopped: "Stopped"
-        case .running: "Running (the Linux VM that hosts containers)"
+        case .missing: "Not created yet. A dedicated VM that can see only ~/PiSandbox."
+        case .stopped: state.otherMachineRunning.map { "Stopped. Starting it stops Podman machine '\($0)' (one VM at a time)." } ?? "Stopped"
+        case .running: "Running. Sees only ~/PiSandbox, not your home folder."
         }
     }
     var machineHealth: Health {
@@ -354,7 +368,7 @@ struct ContentView: View {
     var machineAction: (String?, (() -> Void)?) {
         switch state.machine {
         case .missing: ("Create & start", { Task { await state.createMachine() } })
-        case .stopped: ("Start", { Task { await state.startMachine() } })
+        case .stopped: (state.otherMachineRunning == nil ? "Start" : "Stop other & start", { Task { await state.startMachine() } })
         case .running: ("Stop", { Task { await state.stopMachine() } })
         case .unknown: (nil, nil)
         }

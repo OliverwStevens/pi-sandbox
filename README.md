@@ -6,11 +6,13 @@ that runs on your Mac. Includes a small SwiftUI app to set it all up and launch 
 
 ## How it works
 
-- Pi runs in a Podman container (Podman machine VM on macOS). Only the project folder you choose is mounted at `/workspace`.
-- The container reaches your host model server at `host.containers.internal:<port>`.
-- Hardening: `--cap-drop=ALL`, `no-new-privileges`, read-only root filesystem, tmpfs for `/tmp` and `/root`, memory/CPU/PID limits, fresh agent home each run.
+- Pi runs in a hardened Podman container inside a **dedicated Podman VM** (`pi-sandbox`) that mounts only `~/PiSandbox`. Projects live there. The VM cannot see the rest of your home folder.
+- **Network lock (default):** the container joins an internal Podman network with no route out. A tiny forwarder container (`pi-gate`) relays one port to your model server. No internet, no GitHub, no other localhost services.
+- **Protected paths:** `.git/hooks`, `.git/config`, `.gitattributes`, `.gitmodules`, `.github`, `.envrc`, `.vscode`, `.husky`, `.pre-commit-config.yaml` and `.devcontainer` are mounted read-only, so pi cannot plant code your Mac runs later.
+- Container hardening: `--cap-drop=ALL`, `no-new-privileges`, read-only root filesystem, tmpfs for `/tmp` and `/root`, memory/CPU/PID limits, fresh agent home each run, no host credentials, fixed git identity.
 - Pi is installed at a pinned version with `--ignore-scripts`.
-- **Not restricted:** outbound network. Pi can reach the internet and your LAN. Use git; pi can delete anything in the mounted folder.
+- **Still possible:** pi can edit or delete anything else in the project (use git), and can write other files you might run later (Makefile, `package.json`, scripts). The Monitor tab flags these. A kernel-level container escape is unlikely but not impossible. "Allow internet access" in the app turns the network lock off.
+- Podman on macOS runs one VM at a time: starting the sandbox VM stops any other Podman machine.
 
 ## App
 
@@ -30,6 +32,7 @@ and a project folder; and launches pi in Terminal. Config lives in `~/Library/Ap
 ## Script only
 
 ```bash
+# Legacy shell launcher: no VM isolation or network lock. Prefer the app.
 export OMLX_API_KEY=...        # your server key
 # edit agent-home/models.json: baseUrl port and model id
 ./pi-sandbox ~/path/to/project
@@ -48,9 +51,9 @@ The container has no toolchains for your stack (Ruby, Swift, Python...). Add the
 ## Verifying the sandbox
 
 Click **Run self-test** in the app (or run `sandbox-selftest.sh` inside the container with the same flags).
-It tries to write system dirs, mount filesystems, find host files and credentials, and checks that capabilities
-are dropped and limits are set. Known gaps are reported as warnings: outbound internet is open, and any service
-listening on your Mac's loopback is reachable via `host.containers.internal`, not just the model server.
+It tries to write system dirs and protected paths, mount filesystems, find host files and credentials, reach the
+internet, GitHub, raw IPs and your Mac's localhost, and checks what the VM can see of your home folder. Headless:
+`PiSandbox.app/Contents/MacOS/PiSandbox --selftest` (exit code 1 on any failure).
 
 ## Monitor tab
 

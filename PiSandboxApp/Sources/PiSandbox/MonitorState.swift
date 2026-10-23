@@ -32,6 +32,7 @@ final class MonitorState: ObservableObject {
     func startBaseline(project: String) {
         baselineRoot = project
         seen = [:]
+        gatewayIPs = []
         network = []
         Task {
             let snap = await Task.detached { FileWatcher.snapshot(root: project) }.value
@@ -39,7 +40,7 @@ final class MonitorState: ObservableObject {
         }
     }
 
-    func refresh(podman: String?, project: String, sessions: URL, running: Bool) async {
+    func refresh(podman: String?, connection: String, project: String, sessions: URL, running: Bool) async {
         guard !refreshing else { return }
         refreshing = true
         defer { refreshing = false }
@@ -69,19 +70,22 @@ final class MonitorState: ObservableObject {
         }
 
         // 3. live container: resources + network
-        if running, let podman {
-            let ps = await Shell.run(podman, ["ps", "-q", "--filter", "label=pi-sandbox=1"])
+        if running, let podmanBin = podman {
+            let podman = { (args: [String]) in await Shell.run(podmanBin, ["--connection", connection] + args) }
+            let ps = await podman(["ps", "-q", "--filter", "label=pi-sandbox=1"])
             let ids = ps.out.split(whereSeparator: \.isNewline).map(String.init)
             if let id = ids.first {
-                let st = await Shell.run(podman, ["stats", "--no-stream", "--format", "{{.CPUPerc}}|{{.MemUsage}}", id])
+                let st = await podman(["stats", "--no-stream", "--format", "{{.CPUPerc}}|{{.MemUsage}}", id])
                 let parts = st.out.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "|")
                 if parts.count == 2 { cpu = String(parts[0]); memory = String(parts[1]) }
 
                 if gatewayIPs.isEmpty {
-                    let g = await Shell.run(podman, ["exec", id, "getent", "hosts", "host.containers.internal"])
-                    if let first = g.out.split(separator: " ").first { gatewayIPs.insert(String(first)) }
+                    for name in ["pi-gate", "host.containers.internal"] {
+                        let g = await podman(["exec", id, "getent", "hosts", name])
+                        if let first = g.out.split(separator: " ").first { gatewayIPs.insert(String(first)) }
+                    }
                 }
-                let net = await Shell.run(podman, ["exec", id, "cat", "/proc/net/tcp", "/proc/net/tcp6"])
+                let net = await podman(["exec", id, "cat", "/proc/net/tcp", "/proc/net/tcp6"])
                 for c in NetParse.remotes(net.out) where !c.ip.hasPrefix("127.") && c.ip != "0.0.0.0" {
                     if seen[c.id] == nil {
                         seen[c.id] = NetObservation(connection: c, first: Date(), expected: gatewayIPs.contains(c.ip))

@@ -24,5 +24,17 @@ check   "Process limit enforced" bash -c '[ "$(cat /sys/fs/cgroup/pids.max)" != 
 blocked "Env has no host secrets (only OMLX_API_KEY passed in)" bash -c 'env | grep -Eiq "^(AWS_|GITHUB_|GH_|ANTHROPIC_|OPENAI_|SSH_AUTH_SOCK)"'
 
 net() { node -e "const net=require('net');const [h,p]=process.argv.slice(1);const s=net.connect({host:h,port:+p,timeout:3000},()=>process.exit(0));s.on('error',()=>process.exit(1));s.on('timeout',()=>process.exit(1))" "$1" "$2"; }
-if net example.com 443; then echo "WARN Outbound internet is reachable (not blocked)"; else echo "PASS Outbound internet blocked"; fi
-if net host.containers.internal "${HOST_PORT:-8001}"; then echo "WARN Host loopback services are reachable via host.containers.internal (model server, and any other local port)"; fi
+if [ -d /workspace/.git/hooks ]; then blocked "Git hooks folder is read-only (they run on your Mac)" touch /workspace/.git/hooks/pre-commit; fi
+if [ -f /workspace/.git/config ]; then blocked "Git config is read-only (no new remotes or hooks)" bash -c 'echo x >> /workspace/.git/config'; fi
+if [ -d /workspace/.github ]; then blocked "CI workflows folder is read-only" touch /workspace/.github/probe; fi
+
+if [ "${NET_MODE:-open}" = locked ]; then
+  if net example.com 443; then fail "Internet is reachable"; else pass "Internet is blocked (example.com)"; fi
+  if net github.com 443; then fail "GitHub is reachable"; else pass "GitHub is blocked"; fi
+  if net 1.1.1.1 443; then fail "Raw IP addresses are reachable"; else pass "Direct IP connections are blocked"; fi
+  if net host.containers.internal "${HOST_PORT:-8001}"; then fail "Mac localhost services are reachable directly"; else pass "Your Mac's localhost services are not reachable"; fi
+  if net "${GATE:-pi-gate}" "${HOST_PORT:-8001}"; then pass "Model server is reachable through the gate"; else fail "Model server is NOT reachable through the gate"; fi
+else
+  if net example.com 443; then echo "WARN Outbound internet is reachable (internet access is ON)"; else echo "PASS Outbound internet blocked"; fi
+  if net host.containers.internal "${HOST_PORT:-8001}"; then echo "WARN Mac localhost services are reachable via host.containers.internal (internet access is ON)"; fi
+fi

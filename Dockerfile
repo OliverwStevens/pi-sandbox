@@ -8,5 +8,7 @@ RUN apt-get update \
 RUN npm install -g --ignore-scripts --omit=dev @earendil-works/pi-coding-agent@1.4.0 \
   && npm cache clean --force
 
+COPY gate-forward.js /opt/gate-forward.js
+
 WORKDIR /workspace
 ENTRYPOINT ["pi"]

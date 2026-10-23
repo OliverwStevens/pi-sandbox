@@ -26,10 +26,12 @@ final class AppState: ObservableObject {
     @Published var apiKey: String { didSet { save(); scheduleProbe() } }
     @Published var model: String { didSet { save() } }
     @Published var projectPath: String { didSet { save() } }
+    @Published var allowInternet: Bool { didSet { save() } }
 
     // MARK: live status
     @Published var podmanPath: String?
     @Published var machine: MachineState = .unknown
+    @Published var otherMachineRunning: String?
     @Published var imageBuilt = false
     @Published var server: ServerState = .unknown
     @Published var runningSandboxes = 0
@@ -42,16 +44,26 @@ final class AppState: ObservableObject {
     @Published var log = ""
 
     static let imageName = "pi-sandbox"
+    static let machineName = "pi-sandbox"
+    static let netName = "pi-sandbox-net"
+    static let gateName = "pi-gate"
     static let containerHost = "host.containers.internal"
 
     let support: URL = FileManager.default
         .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("PiSandbox", isDirectory: true)
-    var agentHome: URL { support.appendingPathComponent("agent-home", isDirectory: true) }
+
+    /// The only host folder the Podman VM can see. Projects must live inside it.
+    let workspaceRoot: URL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("PiSandbox", isDirectory: true)
+    var runtimeDir: URL { workspaceRoot.appendingPathComponent(".runtime", isDirectory: true) }
+    var agentHome: URL { runtimeDir.appendingPathComponent("agent-home", isDirectory: true) }
+    var sessionsDir: URL { runtimeDir.appendingPathComponent("sessions", isDirectory: true) }
+    var selfTestProject: URL { runtimeDir.appendingPathComponent("selftest-project", isDirectory: true) }
+    var selfTestScript: URL { runtimeDir.appendingPathComponent("sandbox-selftest.sh") }
     var buildDir: URL { support.appendingPathComponent("build", isDirectory: true) }
-    var sessionsDir: URL { support.appendingPathComponent("sessions", isDirectory: true) }
-    let monitor = MonitorState()
     var keyFile: URL { support.appendingPathComponent("api-key") }
+    let monitor = MonitorState()
 
     private var timer: Timer?
     private var monitorTimer: Timer?
@@ -82,13 +94,14 @@ final class AppState: ObservableObject {
         serverPort = d.string(forKey: "serverPort") ?? "8001"
         model = d.string(forKey: "model") ?? ""
         projectPath = d.string(forKey: "projectPath") ?? ""
+        allowInternet = d.bool(forKey: "allowInternet")
         apiKey = (try? String(contentsOf: support.appendingPathComponent("api-key"), encoding: .utf8)) ?? ""
         installSeed()
         Task { await refresh() }
         monitorTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                await self.monitor.refresh(podman: self.podmanPath, project: self.projectPath,
+                await self.monitor.refresh(podman: self.podmanPath, connection: Self.machineName, project: self.projectPath,
                                            sessions: self.sessionsDir, running: self.runningSandboxes > 0)
             }
         }
@@ -106,6 +119,7 @@ final class AppState: ObservableObject {
         d.set(serverPort, forKey: "serverPort")
         d.set(model, forKey: "model")
         d.set(projectPath, forKey: "projectPath")
+        d.set(allowInternet, forKey: "allowInternet")
         try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
         try? cleanKey.write(to: keyFile, atomically: true, encoding: .utf8)
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: keyFile.path)
@@ -119,20 +133,19 @@ final class AppState: ObservableObject {
         return nil
     }
 
-    /// Copies bundled files into Application Support. The Dockerfile is always refreshed;
+    /// Copies bundled files into place. Build files and the self-test are always refreshed;
     /// AGENTS.md and skills are copied only if missing so user edits survive updates.
     func installSeed() {
         let fm = FileManager.default
         guard let seed = seedURL else { return }
-        try? fm.createDirectory(at: buildDir, withIntermediateDirectories: true)
-        try? fm.createDirectory(at: agentHome, withIntermediateDirectories: true)
-        try? fm.createDirectory(at: sessionsDir, withIntermediateDirectories: true)
-        let dockerfile = buildDir.appendingPathComponent("Dockerfile")
-        try? fm.removeItem(at: dockerfile)
-        try? fm.copyItem(at: seed.appendingPathComponent("Dockerfile"), to: dockerfile)
-        let selftest = support.appendingPathComponent("sandbox-selftest.sh")
-        try? fm.removeItem(at: selftest)
-        try? fm.copyItem(at: seed.appendingPathComponent("sandbox-selftest.sh"), to: selftest)
+        for dir in [buildDir, agentHome, sessionsDir] { try? fm.createDirectory(at: dir, withIntermediateDirectories: true) }
+        for name in ["Dockerfile", "gate-forward.js"] {
+            let dest = buildDir.appendingPathComponent(name)
+            try? fm.removeItem(at: dest)
+            try? fm.copyItem(at: seed.appendingPathComponent(name), to: dest)
+        }
+        try? fm.removeItem(at: selfTestScript)
+        try? fm.copyItem(at: seed.appendingPathComponent("sandbox-selftest.sh"), to: selfTestScript)
         let home = seed.appendingPathComponent("agent-home")
         for item in (try? fm.contentsOfDirectory(atPath: home.path)) ?? [] {
             let dest = agentHome.appendingPathComponent(item)
@@ -163,13 +176,15 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Runs podman against the dedicated machine. `machine` subcommands are passed through untouched.
     private func podman(_ args: [String], stream: Bool = false) async -> ShellResult {
         guard let p = podmanPath else { return ShellResult(code: 127, out: "podman not found") }
-        if stream { append("$ podman \(args.joined(separator: " "))\n") }
+        let full = args.first == "machine" ? args : ["--connection", Self.machineName] + args
         if stream {
-            return await Shell.run(p, args, onOutput: { [weak self] s in self?.append(s) })
+            append("$ podman \(full.joined(separator: " "))\n")
+            return await Shell.run(p, full, onOutput: { [weak self] s in self?.append(s) })
         }
-        return await Shell.run(p, args)
+        return await Shell.run(p, full)
     }
 
     private func withBusy(_ label: String, _ work: () async -> Void) async {
@@ -190,11 +205,16 @@ final class AppState: ObservableObject {
             return
         }
         let list = await podman(["machine", "list", "--format", "json"])
+        otherMachineRunning = nil
         if let data = list.out.data(using: .utf8),
            let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
-            if arr.isEmpty { machine = .missing }
-            else if arr.contains(where: { ($0["Running"] as? Bool) == true }) { machine = .running }
-            else { machine = .stopped }
+            let name: ([String: Any]) -> String = { ($0["Name"] as? String ?? "").replacingOccurrences(of: "*", with: "") }
+            if let mine = arr.first(where: { name($0) == Self.machineName }) {
+                machine = (mine["Running"] as? Bool) == true ? .running : .stopped
+            } else {
+                machine = .missing
+            }
+            otherMachineRunning = arr.first(where: { name($0) != Self.machineName && ($0["Running"] as? Bool) == true }).map(name)
         } else {
             machine = .unknown
         }
@@ -233,7 +253,7 @@ final class AppState: ObservableObject {
         return []
     }
 
-    // MARK: actions
+    // MARK: machine + image actions
 
     func installPodman() async {
         await withBusy("Installing podman…") {
@@ -247,21 +267,53 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Podman on macOS runs one VM at a time, so any other running machine is stopped first.
+    private func stopOtherMachines() async {
+        if let other = otherMachineRunning {
+            append("Stopping Podman machine '\(other)' (only one VM can run at a time).\n")
+            _ = await podman(["machine", "stop", other], stream: true)
+        }
+    }
+
     func createMachine() async {
-        await withBusy("Creating podman machine…") {
-            _ = await podman(["machine", "init"], stream: true)
-            _ = await podman(["machine", "start"], stream: true)
+        await withBusy("Creating the sandbox VM…") {
+            try? FileManager.default.createDirectory(at: runtimeDir, withIntermediateDirectories: true)
+            await stopOtherMachines()
+            let root = workspaceRoot.path
+            _ = await podman(["machine", "init", Self.machineName, "--cpus", "4", "--memory", "2048",
+                              "--disk-size", "20", "-v", "\(root):\(root)"], stream: true)
+            _ = await podman(["machine", "start", Self.machineName], stream: true)
         }
     }
 
     func startMachine() async {
-        await withBusy("Starting podman machine…") { _ = await podman(["machine", "start"], stream: true) }
+        await withBusy("Starting the sandbox VM…") {
+            await stopOtherMachines()
+            _ = await podman(["machine", "start", Self.machineName], stream: true)
+        }
     }
 
     func stopMachine() async {
-        await withBusy("Stopping podman machine…") {
-            _ = await podman(["machine", "stop"], stream: true)
+        await withBusy("Stopping the sandbox VM…") {
+            _ = await podman(["machine", "stop", Self.machineName], stream: true)
         }
+    }
+
+    private func ensureMachineRunning() async -> Bool {
+        if machine == .missing { append("Create the sandbox VM first.\n"); return false }
+        if machine != .running {
+            await stopOtherMachines()
+            _ = await podman(["machine", "start", Self.machineName], stream: true)
+        }
+        return true
+    }
+
+    private func ensureImage() async -> Bool {
+        if (await podman(["image", "exists", Self.imageName])).ok { return true }
+        installSeed()
+        let r = await podman(["build", "-t", Self.imageName, buildDir.path], stream: true)
+        if !r.ok { append("Build failed.\n") }
+        return r.ok
     }
 
     func buildImage() async {
@@ -277,56 +329,110 @@ final class AppState: ObservableObject {
             let ps = await podman(["ps", "-q", "--filter", "label=pi-sandbox=1"])
             let ids = ps.out.split(whereSeparator: \.isNewline).map(String.init)
             if !ids.isEmpty { _ = await podman(["kill"] + ids, stream: true) }
+            _ = await podman(["rm", "-f", Self.gateName])
         }
     }
 
-    var isReady: Bool {
-        guard podmanPath != nil, machine == .running, !projectPath.isEmpty else { return false }
-        if case .ok = server { return true }
-        return false
+    // MARK: network lock
+
+    /// Internal network with no route out, plus one forwarder container that relays only the model server's port.
+    private func ensureGate() async -> Bool {
+        if !(await podman(["network", "exists", Self.netName])).ok {
+            let r = await podman(["network", "create", "--internal", Self.netName], stream: true)
+            if !r.ok { return false }
+        }
+        let target = "\(containerReachableHost()):\(cleanPort)"
+        let label = await podman(["inspect", "--format", "{{index .Config.Labels \"pi-gate-target\"}}", Self.gateName])
+        if label.ok && label.out.trimmingCharacters(in: .whitespacesAndNewlines) == target {
+            let up = await podman(["ps", "-q", "--filter", "name=^\(Self.gateName)$"])
+            if !up.out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
+        }
+        _ = await podman(["rm", "-f", Self.gateName])
+        let r = await podman([
+            "run", "-d", "--name", Self.gateName, "--label", "pi-gate=1", "--label", "pi-gate-target=\(target)",
+            "--network", Self.netName, "--network", "podman",
+            "--cap-drop=ALL", "--security-opt=no-new-privileges", "--read-only",
+            "--memory=128m", "--pids-limit=64", "--restart=no",
+            "--entrypoint", "node", Self.imageName, "/opt/gate-forward.js", cleanPort, containerReachableHost(), cleanPort,
+        ], stream: true)
+        if !r.ok { append("Could not start the network gate.\n") }
+        return r.ok
     }
 
-    func runSelfTest() async {
-        await withBusy("Running sandbox self-test…") {
-            if machine != .running { _ = await podman(["machine", "start"], stream: true) }
-            installSeed()
-            if !(await podman(["image", "exists", Self.imageName])).ok {
-                let r = await podman(["build", "-t", Self.imageName, buildDir.path], stream: true)
-                guard r.ok else { append("Build failed.\n"); return }
-            }
-            let fm = FileManager.default
-            let canary = support.appendingPathComponent("sandbox-canary-\(UUID().uuidString).txt")
-            let project = support.appendingPathComponent("selftest-project", isDirectory: true)
-            try? fm.createDirectory(at: project, withIntermediateDirectories: true)
-            try? "host secret".write(to: canary, atomically: true, encoding: .utf8)
-            defer { try? fm.removeItem(at: canary) }
-            let script = support.appendingPathComponent("sandbox-selftest.sh").path
-            let args = ["run", "--rm"] + Self.hardening + [
-                "-e", "CANARY=\(canary.path)", "-e", "HOST_PORT=\(cleanPort)",
-                "-v", "\(project.path):/workspace", "-v", "\(script):/selftest.sh:ro",
-                "--entrypoint", "bash", Self.imageName, "/selftest.sh",
-            ]
-            let r = await podman(args)
-            var results: [TestResult] = []
-            for line in r.out.split(whereSeparator: \.isNewline) {
-                for tag in ["PASS", "FAIL", "WARN"] where line.hasPrefix(tag + " ") {
-                    results.append(TestResult(status: tag, text: String(line.dropFirst(5))))
-                }
-            }
-            if results.isEmpty { append("Self-test produced no results:\n\(r.out)\n") }
-            selfTest = results
-            selfTestRan = true
+    // MARK: protections
+
+    /// Paths inside the project that your Mac executes later (git hooks, CI, shell env). Mounted read-only in the sandbox.
+    static let protectedPaths = [
+        ".git/hooks", ".git/config", ".gitmodules", ".gitattributes", ".github", ".envrc",
+        ".vscode", ".husky", ".pre-commit-config.yaml", ".devcontainer",
+    ]
+
+    func protectedMounts(project: String) -> [String] {
+        var out: [String] = []
+        for rel in Self.protectedPaths where FileManager.default.fileExists(atPath: project + "/" + rel) {
+            out += ["-v", "\(project)/\(rel):/workspace/\(rel):ro"]
         }
+        return out
+    }
+
+    /// Flags that define the sandbox. Shared by the launcher and the self-test so the test checks what really runs.
+    static let hardening = [
+        "--cap-drop=ALL", "--security-opt=no-new-privileges", "--read-only",
+        "--tmpfs", "/tmp:rw,size=256m", "--tmpfs", "/root:rw,size=128m",
+        "--pids-limit=256", "--memory=1g", "--cpus=2",
+    ]
+
+    /// Fixed git identity so commits work without any host config.
+    static let gitEnv = [
+        "-e", "GIT_AUTHOR_NAME=pi", "-e", "GIT_AUTHOR_EMAIL=pi@sandbox.invalid",
+        "-e", "GIT_COMMITTER_NAME=pi", "-e", "GIT_COMMITTER_EMAIL=pi@sandbox.invalid",
+    ]
+
+    var networkArgs: [String] { allowInternet ? [] : ["--network", Self.netName] }
+
+    // MARK: workspace
+
+    var projectInsideWorkspace: Bool {
+        !projectPath.isEmpty && projectPath.hasPrefix(workspaceRoot.path + "/")
+    }
+
+    func revealWorkspace() {
+        try? FileManager.default.createDirectory(at: workspaceRoot, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(workspaceRoot)
     }
 
     func chooseProject() {
+        try? FileManager.default.createDirectory(at: workspaceRoot, withIntermediateDirectories: true)
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.canCreateDirectories = true
+        panel.directoryURL = workspaceRoot
         panel.prompt = "Choose"
-        panel.message = "Pi can read and change everything in this folder."
-        if panel.runModal() == .OK, let url = panel.url { projectPath = url.path }
+        panel.message = "Pi can read and change everything in this folder. It must be inside ~/PiSandbox."
+        guard panel.runModal() == .OK, let picked = panel.url?.resolvingSymlinksInPath() else { return }
+        let root = workspaceRoot.resolvingSymlinksInPath().path
+        if picked.path.hasPrefix(root + "/") { projectPath = picked.path; return }
+
+        let alert = NSAlert()
+        alert.messageText = "Copy “\(picked.lastPathComponent)” into ~/PiSandbox?"
+        alert.informativeText = "The sandbox VM can only see ~/PiSandbox, so the rest of your Mac stays out of reach. Pi will work on the copy; bring changes back with git or by copying files."
+        alert.addButton(withTitle: "Copy")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let dest = workspaceRoot.appendingPathComponent(picked.lastPathComponent, isDirectory: true)
+        if FileManager.default.fileExists(atPath: dest.path) {
+            append("\(dest.path) already exists; using it.\n")
+            projectPath = dest.path
+            return
+        }
+        Task {
+            busy = "Copying project…"
+            let r = await Shell.run("/usr/bin/ditto", [picked.path, dest.path])
+            append(r.ok ? "Copied to \(dest.path)\n" : "Copy failed: \(r.out)\n")
+            if r.ok { projectPath = dest.path }
+            busy = nil
+        }
     }
 
     func openAgentFolder() {
@@ -334,21 +440,67 @@ final class AppState: ObservableObject {
         NSWorkspace.shared.open(agentHome)
     }
 
-    var canLaunch: Bool {
-        guard busy == nil, podmanPath != nil, !projectPath.isEmpty, !model.isEmpty else { return false }
+    var isReady: Bool {
+        guard podmanPath != nil, machine == .running, projectInsideWorkspace else { return false }
         if case .ok = server { return true }
         return false
     }
 
+    var canLaunch: Bool {
+        guard busy == nil, podmanPath != nil, projectInsideWorkspace, !model.isEmpty, machine != .missing else { return false }
+        if case .ok = server { return true }
+        return false
+    }
+
+    // MARK: self-test
+
+    func runSelfTest() async {
+        await withBusy("Running sandbox self-test…") {
+            guard await ensureMachineRunning(), await ensureImage() else { return }
+            installSeed()
+            if !allowInternet { guard await ensureGate() else { return } }
+
+            let fm = FileManager.default
+            let canary = support.appendingPathComponent("sandbox-canary-\(UUID().uuidString).txt")
+            try? "host secret".write(to: canary, atomically: true, encoding: .utf8)
+            defer { try? fm.removeItem(at: canary) }
+            let project = selfTestProject
+            for rel in [".git/hooks", ".github"] { try? fm.createDirectory(at: project.appendingPathComponent(rel), withIntermediateDirectories: true) }
+            try? "[core]\n".write(to: project.appendingPathComponent(".git/config"), atomically: true, encoding: .utf8)
+
+            var results: [TestResult] = []
+            // App-side: what can the VM itself see of your home folder?
+            let ls = await Shell.run(podmanPath ?? "", ["machine", "ssh", Self.machineName, "ls -A \(NSHomeDirectory())"])
+            let seen = ls.out.trimmingCharacters(in: .whitespacesAndNewlines)
+            results.append(seen == "PiSandbox"
+                ? TestResult(status: "PASS", text: "The sandbox VM sees only ~/PiSandbox, not the rest of your home folder")
+                : TestResult(status: "FAIL", text: "The sandbox VM can see more than ~/PiSandbox: \(seen.replacingOccurrences(of: "\n", with: ", "))"))
+
+            let args = ["run", "--rm"] + Self.hardening + networkArgs + protectedMounts(project: project.path) + [
+                "-e", "CANARY=\(canary.path)", "-e", "HOST_PORT=\(cleanPort)",
+                "-e", "NET_MODE=\(allowInternet ? "open" : "locked")", "-e", "GATE=\(Self.gateName)",
+                "-v", "\(project.path):/workspace", "-v", "\(selfTestScript.path):/selftest.sh:ro",
+                "--entrypoint", "bash", Self.imageName, "/selftest.sh",
+            ]
+            let r = await podman(args)
+            for line in r.out.split(whereSeparator: \.isNewline) {
+                for tag in ["PASS", "FAIL", "WARN"] where line.hasPrefix(tag + " ") {
+                    results.append(TestResult(status: tag, text: String(line.dropFirst(5))))
+                }
+            }
+            if results.count <= 1 { append("Self-test produced no container results:\n\(r.out)\n") }
+            selfTest = results
+            selfTestRan = true
+        }
+    }
+
+    // MARK: launch
+
     func launch() async {
         await withBusy("Launching…") {
             guard let podmanPath else { return }
-            if machine != .running { _ = await podman(["machine", "start"], stream: true) }
-            if !(await podman(["image", "exists", Self.imageName])).ok {
-                installSeed()
-                let r = await podman(["build", "-t", Self.imageName, buildDir.path], stream: true)
-                guard r.ok else { append("Build failed.\n"); return }
-            }
+            guard await ensureMachineRunning(), await ensureImage() else { return }
+            if !allowInternet { guard await ensureGate() else { return } }
             writePiConfig()
             let script = launchScript(podman: podmanPath)
             let file = support.appendingPathComponent("run.command")
@@ -373,11 +525,12 @@ final class AppState: ObservableObject {
 
     private func writePiConfig() {
         let ids = models.isEmpty ? [model] : models
+        let upstream = allowInternet ? containerReachableHost() : Self.gateName
         let config: [String: Any] = [
             "$schema": "https://pi.dev/schemas/models.schema.json",
             "providers": [
                 "omlx": [
-                    "baseUrl": "http://\(containerReachableHost()):\(cleanPort)/v1",
+                    "baseUrl": "http://\(upstream):\(cleanPort)/v1",
                     "api": "openai-completions",
                     "apiKey": "$OMLX_API_KEY",
                     "models": ids.map { ["id": $0] },
@@ -397,24 +550,19 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Flags that define the sandbox. Shared by the launcher and the self-test so the test checks what really runs.
-    static let hardening = [
-        "--cap-drop=ALL", "--security-opt=no-new-privileges", "--read-only",
-        "--tmpfs", "/tmp:rw,size=256m", "--tmpfs", "/root:rw,size=128m",
-        "--pids-limit=256", "--memory=1g", "--cpus=2",
-    ]
-
     private func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 
     private func launchScript(podman: String) -> String {
-        """
+        let flags = (Self.hardening + networkArgs + Self.gitEnv + protectedMounts(project: projectPath))
+            .map(q).joined(separator: " ")
+        return """
         #!/bin/bash
         # Generated by Pi Sandbox. Do not edit; changes are overwritten on launch.
         export OMLX_API_KEY="$(cat \(q(keyFile.path)))"
         cd \(q(projectPath)) || exit 1
-        \(q(podman)) run --rm -it \\
+        \(q(podman)) --connection \(Self.machineName) run --rm -it \\
           --label pi-sandbox=1 \\
-          \(Self.hardening.map(q).joined(separator: " ")) \\
+          \(flags) \\
           -e OMLX_API_KEY \\
           -v \(q(projectPath)):/workspace \\
           -v \(q(agentHome.path)):/seed:ro \\
