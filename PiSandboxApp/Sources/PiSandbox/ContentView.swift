@@ -173,7 +173,7 @@ struct ContentView: View {
     var serverDetail: String {
         switch state.server {
         case .unknown: "Checking…"
-        case .down: "Not reachable at \(state.serverHost):\(state.serverPort)"
+        case .down: "Not reachable at \(state.cleanHost):\(state.cleanPort)"
         case .unauthorized: "Reachable, but API key rejected"
         case .ok(let m): "Connected, \(m.count) model\(m.count == 1 ? "" : "s")"
         }

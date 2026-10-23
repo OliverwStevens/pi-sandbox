@@ -15,9 +15,9 @@ enum ServerState: Equatable {
 @MainActor
 final class AppState: ObservableObject {
     // MARK: persisted settings
-    @Published var serverHost: String { didSet { save() } }
-    @Published var serverPort: String { didSet { save() } }
-    @Published var apiKey: String { didSet { save() } }
+    @Published var serverHost: String { didSet { save(); scheduleProbe() } }
+    @Published var serverPort: String { didSet { save(); scheduleProbe() } }
+    @Published var apiKey: String { didSet { save(); scheduleProbe() } }
     @Published var model: String { didSet { save() } }
     @Published var projectPath: String { didSet { save() } }
 
@@ -42,6 +42,26 @@ final class AppState: ObservableObject {
     var keyFile: URL { support.appendingPathComponent("api-key") }
 
     private var timer: Timer?
+    private var probeTask: Task<Void, Never>?
+
+    /// Host without scheme, path or whitespace, so "http://localhost:8001/" pasted by mistake still works.
+    var cleanHost: String {
+        var h = serverHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        for prefix in ["http://", "https://"] where h.lowercased().hasPrefix(prefix) { h = String(h.dropFirst(prefix.count)) }
+        if let slash = h.firstIndex(of: "/") { h = String(h[..<slash]) }
+        return h
+    }
+    var cleanPort: String { serverPort.trimmingCharacters(in: .whitespacesAndNewlines) }
+    var cleanKey: String { apiKey.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    private func scheduleProbe() {
+        probeTask?.cancel()
+        probeTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            guard !Task.isCancelled else { return }
+            await probeServer()
+        }
+    }
 
     init() {
         let d = UserDefaults.standard
@@ -67,7 +87,7 @@ final class AppState: ObservableObject {
         d.set(model, forKey: "model")
         d.set(projectPath, forKey: "projectPath")
         try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
-        try? apiKey.write(to: keyFile, atomically: true, encoding: .utf8)
+        try? cleanKey.write(to: keyFile, atomically: true, encoding: .utf8)
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: keyFile.path)
     }
 
@@ -166,9 +186,9 @@ final class AppState: ObservableObject {
     }
 
     func probeServer() async {
-        guard let url = URL(string: "http://\(serverHost):\(serverPort)/v1/models") else { server = .down; return }
+        guard let url = URL(string: "http://\(cleanHost):\(cleanPort)/v1/models") else { server = .down; return }
         var req = URLRequest(url: url, timeoutInterval: 3)
-        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        req.setValue("Bearer \(cleanKey)", forHTTPHeaderField: "Authorization")
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
@@ -178,7 +198,7 @@ final class AppState: ObservableObject {
                   let items = json["data"] as? [[String: Any]] else { server = .down; return }
             let ids = items.compactMap { $0["id"] as? String }
             server = .ok(models: ids)
-            if model.isEmpty || !ids.contains(model), let first = ids.first, !ids.contains(model) { model = first }
+            if !ids.contains(model), let first = ids.first { model = first }
         } catch {
             server = .down
         }
@@ -283,7 +303,7 @@ final class AppState: ObservableObject {
     // MARK: generated files
 
     private func containerReachableHost() -> String {
-        ["localhost", "127.0.0.1", "::1", "0.0.0.0"].contains(serverHost) ? Self.containerHost : serverHost
+        ["localhost", "127.0.0.1", "::1", "0.0.0.0"].contains(cleanHost) ? Self.containerHost : cleanHost
     }
 
     private func writePiConfig() {
@@ -292,7 +312,7 @@ final class AppState: ObservableObject {
             "$schema": "https://pi.dev/schemas/models.schema.json",
             "providers": [
                 "omlx": [
-                    "baseUrl": "http://\(containerReachableHost()):\(serverPort)/v1",
+                    "baseUrl": "http://\(containerReachableHost()):\(cleanPort)/v1",
                     "api": "openai-completions",
                     "apiKey": "$OMLX_API_KEY",
                     "models": ids.map { ["id": $0] },

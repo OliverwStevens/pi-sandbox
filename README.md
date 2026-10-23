@@ -17,7 +17,7 @@ that runs on your Mac. Includes a small SwiftUI app to set it all up and launch 
 Requires macOS 14+, Apple silicon, and Command Line Tools (no Xcode needed).
 
 ```bash
-./PiSandboxApp/build.sh        # -> PiSandboxApp/dist/PiSandbox.app and PiSandbox.zip
+./PiSandboxApp/build.sh        # -> PiSandboxApp/dist/PiSandbox.app, .zip and .dmg
 ```
 
 The app is ad-hoc signed, not notarized. On another Mac: right-click the app and choose Open, or run
@@ -34,6 +34,16 @@ export OMLX_API_KEY=...        # your server key
 # edit agent-home/models.json: baseUrl port and model id
 ./pi-sandbox ~/path/to/project
 ```
+
+## Coding with the sandbox
+
+1. Make sure the project is a git repo with your work committed. Pi can edit or delete anything in the folder.
+2. In the app: pick the project folder, check all rows are green, click **Launch Pi**. A Terminal window opens with pi running in `/workspace`.
+3. Talk to pi in that terminal. Describe a task; it reads, edits and runs commands inside the container (pi has `git`, `rg`, `node`; install more with the Dockerfile).
+4. Review in your normal editor and git on the Mac: `git diff`, `git checkout .` to undo. The folder is shared live, so edits appear in your IDE at once.
+5. Useful in pi: `/model` to switch model, `/skill:small-steps` to force a skill, Ctrl+C to interrupt, `/quit` to exit. Stop everything from the menu bar item.
+
+The container has no toolchains for your stack (Ruby, Swift, Python...). Add them to the `Dockerfile`, then rebuild the image from the app.
 
 ## Guiding the agent
 
