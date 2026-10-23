@@ -11,7 +11,7 @@ BIN="$(swift build -c release --arch arm64 --show-bin-path)/PiSandbox"
 rm -rf dist && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/seed/agent-home"
 cp "$BIN" "$APP/Contents/MacOS/PiSandbox"
 cp assets/AppIcon.icns "$APP/Contents/Resources/"
-cp "$ROOT/Dockerfile" "$APP/Contents/Resources/seed/"
+cp "$ROOT/Dockerfile" "$ROOT/sandbox-selftest.sh" "$APP/Contents/Resources/seed/"
 cp "$ROOT/agent-home/AGENTS.md" "$APP/Contents/Resources/seed/agent-home/"
 cp -R "$ROOT/agent-home/skills" "$APP/Contents/Resources/seed/agent-home/"
 

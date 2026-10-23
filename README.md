@@ -45,6 +45,13 @@ export OMLX_API_KEY=...        # your server key
 
 The container has no toolchains for your stack (Ruby, Swift, Python...). Add them to the `Dockerfile`, then rebuild the image from the app.
 
+## Verifying the sandbox
+
+Click **Run self-test** in the app (or run `sandbox-selftest.sh` inside the container with the same flags).
+It tries to write system dirs, mount filesystems, find host files and credentials, and checks that capabilities
+are dropped and limits are set. Known gaps are reported as warnings: outbound internet is open, and any service
+listening on your Mac's loopback is reachable via `host.containers.internal`, not just the model server.
+
 ## Guiding the agent
 
 `agent-home/AGENTS.md` holds always-on rules. `agent-home/skills/` holds skills

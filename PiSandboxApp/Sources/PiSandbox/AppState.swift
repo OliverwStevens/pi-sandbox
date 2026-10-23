@@ -4,6 +4,12 @@ import SwiftUI
 
 enum Health { case ok, warn, bad, unknown }
 
+struct TestResult: Identifiable {
+    let id = UUID()
+    let status: String   // PASS, FAIL or WARN
+    let text: String
+}
+
 enum MachineState: Equatable { case unknown, missing, stopped, running }
 
 enum ServerState: Equatable {
@@ -29,6 +35,9 @@ final class AppState: ObservableObject {
     @Published var runningSandboxes = 0
     @Published var busy: String?
     @Published var showKey = false
+    @Published var showLog = false
+    @Published var selfTest: [TestResult] = []
+    @Published var selfTestRan = false
     @Published var log = ""
 
     static let imageName = "pi-sandbox"
@@ -109,6 +118,9 @@ final class AppState: ObservableObject {
         let dockerfile = buildDir.appendingPathComponent("Dockerfile")
         try? fm.removeItem(at: dockerfile)
         try? fm.copyItem(at: seed.appendingPathComponent("Dockerfile"), to: dockerfile)
+        let selftest = support.appendingPathComponent("sandbox-selftest.sh")
+        try? fm.removeItem(at: selftest)
+        try? fm.copyItem(at: seed.appendingPathComponent("sandbox-selftest.sh"), to: selftest)
         let home = seed.appendingPathComponent("agent-home")
         for item in (try? fm.contentsOfDirectory(atPath: home.path)) ?? [] {
             let dest = agentHome.appendingPathComponent(item)
@@ -256,6 +268,45 @@ final class AppState: ObservableObject {
         }
     }
 
+    var isReady: Bool {
+        guard podmanPath != nil, machine == .running, !projectPath.isEmpty else { return false }
+        if case .ok = server { return true }
+        return false
+    }
+
+    func runSelfTest() async {
+        await withBusy("Running sandbox self-test…") {
+            if machine != .running { _ = await podman(["machine", "start"], stream: true) }
+            installSeed()
+            if !(await podman(["image", "exists", Self.imageName])).ok {
+                let r = await podman(["build", "-t", Self.imageName, buildDir.path], stream: true)
+                guard r.ok else { append("Build failed.\n"); return }
+            }
+            let fm = FileManager.default
+            let canary = support.appendingPathComponent("sandbox-canary-\(UUID().uuidString).txt")
+            let project = support.appendingPathComponent("selftest-project", isDirectory: true)
+            try? fm.createDirectory(at: project, withIntermediateDirectories: true)
+            try? "host secret".write(to: canary, atomically: true, encoding: .utf8)
+            defer { try? fm.removeItem(at: canary) }
+            let script = support.appendingPathComponent("sandbox-selftest.sh").path
+            let args = ["run", "--rm"] + Self.hardening + [
+                "-e", "CANARY=\(canary.path)", "-e", "HOST_PORT=\(cleanPort)",
+                "-v", "\(project.path):/workspace", "-v", "\(script):/selftest.sh:ro",
+                "--entrypoint", "bash", Self.imageName, "/selftest.sh",
+            ]
+            let r = await podman(args)
+            var results: [TestResult] = []
+            for line in r.out.split(whereSeparator: \.isNewline) {
+                for tag in ["PASS", "FAIL", "WARN"] where line.hasPrefix(tag + " ") {
+                    results.append(TestResult(status: tag, text: String(line.dropFirst(5))))
+                }
+            }
+            if results.isEmpty { append("Self-test produced no results:\n\(r.out)\n") }
+            selfTest = results
+            selfTestRan = true
+        }
+    }
+
     func chooseProject() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
@@ -332,6 +383,13 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Flags that define the sandbox. Shared by the launcher and the self-test so the test checks what really runs.
+    static let hardening = [
+        "--cap-drop=ALL", "--security-opt=no-new-privileges", "--read-only",
+        "--tmpfs", "/tmp:rw,size=256m", "--tmpfs", "/root:rw,size=128m",
+        "--pids-limit=256", "--memory=1g", "--cpus=2",
+    ]
+
     private func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 
     private func launchScript(podman: String) -> String {
@@ -342,12 +400,7 @@ final class AppState: ObservableObject {
         cd \(q(projectPath)) || exit 1
         \(q(podman)) run --rm -it \\
           --label pi-sandbox=1 \\
-          --cap-drop=ALL \\
-          --security-opt=no-new-privileges \\
-          --read-only \\
-          --tmpfs /tmp:rw,size=256m \\
-          --tmpfs /root:rw,size=128m \\
-          --pids-limit=256 --memory=1g --cpus=2 \\
+          \(Self.hardening.map(q).joined(separator: " ")) \\
           -e OMLX_API_KEY \\
           -v \(q(projectPath)):/workspace \\
           -v \(q(agentHome.path)):/seed:ro \\

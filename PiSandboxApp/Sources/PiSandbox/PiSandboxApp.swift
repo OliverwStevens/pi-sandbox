@@ -8,7 +8,6 @@ struct PiSandboxApp: App {
         Window("Pi Sandbox", id: "main") {
             ContentView().environmentObject(state)
         }
-        .windowResizability(.contentSize)
 
         MenuBarExtra("Pi Sandbox", systemImage: "terminal") {
             MenuContent().environmentObject(state)
